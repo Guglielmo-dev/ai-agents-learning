@@ -83,8 +83,8 @@ app.MapPost("/chat", async (
     // Recuperiamo la sessione esistente per quel conversationId, oppure ne creiamo una nuova
     if (!sessions.TryGetValue(request.ConversationId, out var session))
     {
-        session = await agent.CreateSessionAsync();
-        sessions[request.ConversationId] = session;
+        var newSession = await agent.CreateSessionAsync();
+        session = sessions.GetOrAdd(request.ConversationId, newSession);
     }
 
     // Eseguiamo l'agente passando sia il messaggio che la sessione specifica di questa chat
@@ -102,8 +102,8 @@ app.MapPost("/chat/raw", async (
 {
     if (!sessions.TryGetValue(request.ConversationId, out var session))
     {
-        session = await agent.CreateSessionAsync();
-        sessions[request.ConversationId] = session;
+        var newSession = await agent.CreateSessionAsync();
+        session = sessions.GetOrAdd(request.ConversationId, newSession);
     }
 
     AgentResponse response = await agent.RunAsync(request.Message, session);
