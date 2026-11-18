@@ -1,3 +1,8 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="evals.md" />
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="../radar-agent-api.Tests/radar-agent-api.Tests.csproj" Id="6d9bb7de-12a3-4960-805d-be8ef1fb86ba" />
   <Project Path="radar-agent-api.csproj" />
 </Solution>
