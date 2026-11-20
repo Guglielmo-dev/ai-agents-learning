@@ -4,8 +4,8 @@ using Microsoft.Extensions.AI;
 using OllamaSharp;
 using radar_agent_api.Agents.Tools;
 using radar_agent_api.Data;
+using radar_agent_api.Store;
 using Scalar.AspNetCore;
-using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +17,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddScoped<TicketTools>();
 
 var ollamaUrl = builder.Configuration["Ollama:BaseUrl"] ?? "http://localhost:11434/";
+
+builder.Services.AddSingleton<PersistentSessionStore>();
 
 // 2. REGISTRIAMO IL CLIENT OLLAMA NELLA DI
 // Usiamo AddSingleton perché il client HTTP e la connessione a Ollama vanno riutilizzati
@@ -50,8 +52,6 @@ builder.Services.AddScoped<AIAgent>(sp =>
     );
 });
 
-builder.Services.AddSingleton<ConcurrentDictionary<string, AgentSession>>();
-
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
@@ -73,24 +73,19 @@ app.MapGet("/", () => Results.Redirect("/scalar/v1")).ExcludeFromDescription();
 app.MapPost("/chat", async (
     ChatRequest request,
     AIAgent agent,
-    ConcurrentDictionary<string, AgentSession> sessions) =>
+    PersistentSessionStore sessionStore,
+    CancellationToken ct) =>
 {
-    if (string.IsNullOrWhiteSpace(request.ConversationId) || string.IsNullOrWhiteSpace(request.Message))
-    {
-        return Results.BadRequest("ConversationId e Message sono obbligatori.");
-    }
+    // 1. Ripristina da RAM, oppure da SQL, oppure crea nuova sessione
+    var session = await sessionStore.GetOrCreateAsync(agent, request.ConversationId, ct);
 
-    // Recuperiamo la sessione esistente per quel conversationId, oppure ne creiamo una nuova
-    if (!sessions.TryGetValue(request.ConversationId, out var session))
-    {
-        var newSession = await agent.CreateSessionAsync();
-        session = sessions.GetOrAdd(request.ConversationId, newSession);
-    }
+    // 2. Esegui l'agente con il contesto ripristinato
+    var response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
 
-    // Eseguiamo l'agente passando sia il messaggio che la sessione specifica di questa chat
-    AgentResponse response = await agent.RunAsync(request.Message, session);
+    // 3. Serializza e persisti subito lo stato aggiornato su SQL + Cache
+    await sessionStore.SaveAsync(agent, request.ConversationId, session, ct);
 
-    return Results.Ok(new ChatResponse(request.ConversationId, response.Text));
+    return Results.Ok(new { reply = response.Text });
 })          
     .WithName("ChatWithAgent")
     .WithSummary("Invia un messaggio all'agente di supporto mantenendo lo stato tramite conversationId");
@@ -98,20 +93,16 @@ app.MapPost("/chat", async (
 app.MapPost("/chat/raw", async (
     ChatRequest request,
     AIAgent agent,
-    ConcurrentDictionary<string, AgentSession> sessions) =>
+    PersistentSessionStore sessionStore,
+    CancellationToken ct) =>
 {
-    if (!sessions.TryGetValue(request.ConversationId, out var session))
-    {
-        var newSession = await agent.CreateSessionAsync();
-        session = sessions.GetOrAdd(request.ConversationId, newSession);
-    }
+    var session = await sessionStore.GetOrCreateAsync(agent, request.ConversationId, ct);
 
-    AgentResponse response = await agent.RunAsync(request.Message, session);
+    AgentResponse response = await agent.RunAsync(request.Message, session, cancellationToken: ct);
+
+    await sessionStore.SaveAsync(agent, request.ConversationId, session, ct);
+
     return Results.Text(response.Text, "text/plain; charset=utf-8");
 });
 
 app.Run();
-
-// DTO (Data Transfer Objects) per il body JSON in ingresso e in uscita
-public record ChatRequest(string ConversationId, string Message);
-public record ChatResponse(string ConversationId, string Reply);

@@ -22,6 +22,24 @@ namespace radar_agent_api.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("radar_agent_api.Data.AgentConversation", b =>
+                {
+                    b.Property<string>("ConversationId")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("StateJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("ConversationId");
+
+                    b.ToTable("AgentConversations");
+                });
+
             modelBuilder.Entity("radar_agent_api.Data.Ticket", b =>
                 {
                     b.Property<int>("Id")

@@ -8,4 +8,8 @@
         public required string Priority { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     }
+
+    // DTO (Data Transfer Objects) per il body JSON in ingresso e in uscita
+    public record ChatRequest(string ConversationId, string Message);
+    public record ChatResponse(string ConversationId, string Reply);
 }
