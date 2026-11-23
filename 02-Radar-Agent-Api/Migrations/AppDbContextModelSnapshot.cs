@@ -40,6 +40,31 @@ namespace radar_agent_api.Migrations
                     b.ToTable("AgentConversations");
                 });
 
+            modelBuilder.Entity("radar_agent_api.Data.PendingApproval", b =>
+                {
+                    b.Property<string>("RequestId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("ConversationId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("FunctionName")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("SerializedRequestJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("RequestId");
+
+                    b.ToTable("PendingApprovals");
+                });
+
             modelBuilder.Entity("radar_agent_api.Data.Ticket", b =>
                 {
                     b.Property<int>("Id")

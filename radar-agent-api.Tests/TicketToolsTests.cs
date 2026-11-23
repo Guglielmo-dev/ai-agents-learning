@@ -76,4 +76,39 @@ public class TicketToolsTests
         // Assert
         Assert.Contains("Nessun ticket trovato", result);
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task CreateTicketAsync_WithEmptyTitle_ShouldRejectAndNotSave(string invalidTitle)
+    {
+        // Arrange
+        await using var dbContext = CreateInMemoryDbContext();
+        var tools = new TicketTools(dbContext);
+
+        // Act
+        var result = await tools.CreateTicketAsync(invalidTitle, "High");
+
+        // Assert
+        Assert.Contains("Errore di validazione", result);
+        Assert.Empty(dbContext.Tickets);
+    }
+
+    [Theory]
+    [InlineData("Super Critical")]
+    [InlineData("Urgent")]
+    [InlineData("")]
+    public async Task CreateTicketAsync_WithInvalidPriority_ShouldRejectAndNotSave(string invalidPriority)
+    {
+        // Arrange
+        await using var dbContext = CreateInMemoryDbContext();
+        var tools = new TicketTools(dbContext);
+
+        // Act
+        var result = await tools.CreateTicketAsync("Stampante bloccata", invalidPriority);
+
+        // Assert
+        Assert.Contains("Errore di validazione", result);
+        Assert.Empty(dbContext.Tickets);
+    }
 }

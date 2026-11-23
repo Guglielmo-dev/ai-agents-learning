@@ -2,10 +2,12 @@ using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using OllamaSharp;
+using radar_agent_api.Agents;
 using radar_agent_api.Agents.Tools;
 using radar_agent_api.Data;
 using radar_agent_api.Store;
 using Scalar.AspNetCore;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -38,17 +40,18 @@ builder.Services.AddScoped<AIAgent>(sp =>
     var ticketTools = sp.GetRequiredService<TicketTools>();
 
     AIFunction searchTool = AIFunctionFactory.Create(ticketTools.SearchTicketsAsync, name: "SearchTickets");
-    AIFunction createTool = AIFunctionFactory.Create(ticketTools.CreateTicketAsync, name: "CreateTickets");
+    AIFunction createTool = AIFunctionFactory.Create(ticketTools.CreateTicketAsync, name: "CreateTicket");
+    AIFunction approvalRequiredCreateTicket = new ApprovalRequiredAIFunction(createTool);
         
     return chatClient.AsAIAgent(
         name: "DatabaseSupportAgent",
         instructions: """
             Sei un assistente IT collegato al database aziendale dei ticket.
             - Quando l'utente chiede di cercare o vedere i ticket, usa il tool SearchTickets passando lo stato ('Open' o 'Closed') oppure vuoto per vederli tutti.
-            - Quando l'utente chiede di aprire o creare un nuovo ticket, usa il tool CreateTickets specificando titolo e priorità.
+            - Quando l'utente chiede di aprire o creare un nuovo ticket, usa il tool CreateTicket specificando titolo e priorità ('Low', 'Medium', 'High', 'Critical').
             Rispondi sempre in italiano in modo chiaro e sintetico.
             """,
-        tools: [ searchTool, createTool ]
+        tools: [ searchTool, approvalRequiredCreateTicket]
     );
 });
 
@@ -74,6 +77,7 @@ app.MapPost("/chat", async (
     ChatRequest request,
     AIAgent agent,
     PersistentSessionStore sessionStore,
+    AppDbContext dbContext,
     CancellationToken ct) =>
 {
     // 1. Ripristina da RAM, oppure da SQL, oppure crea nuova sessione
@@ -85,7 +89,8 @@ app.MapPost("/chat", async (
     // 3. Serializza e persisti subito lo stato aggiornato su SQL + Cache
     await sessionStore.SaveAsync(agent, request.ConversationId, session, ct);
 
-    return Results.Ok(new { reply = response.Text });
+    var result = await AgentHelpers.HandleAgentResponseAsync(request.ConversationId, response, dbContext);
+    return Results.Ok(result);
 })          
     .WithName("ChatWithAgent")
     .WithSummary("Invia un messaggio all'agente di supporto mantenendo lo stato tramite conversationId");
@@ -104,5 +109,47 @@ app.MapPost("/chat/raw", async (
 
     return Results.Text(response.Text, "text/plain; charset=utf-8");
 });
+
+app.MapPost("/chat/approve", async (
+    ApprovalDecisionRequest decision,
+    AIAgent agent,
+    PersistentSessionStore sessionStore,
+    AppDbContext dbContext,
+    CancellationToken ct) =>
+{
+    // 1. Recupero la richiesta di approvazione salvata su SQL Server
+    var pending = await dbContext.PendingApprovals
+        .FirstOrDefaultAsync(p => p.RequestId == decision.RequestId
+            && p.ConversationId == decision.ConversationId, ct);
+
+    if (pending is null)
+        return Results.NotFound("Richiesta di approvazione non trovata o già gestita.");
+
+    // 2. Deserializzo il ToolApprovalRequestContent originale
+    var requestContent = JsonSerializer.Deserialize<AIContent>(
+        pending.SerializedRequestJson,
+        AIJsonUtilities.DefaultOptions) as ToolApprovalRequestContent;
+
+    if (requestContent is null)
+        return Results.Problem("Impossibile deserializzare la richiesta di approvazione.");
+
+    var session = await sessionStore.GetOrCreateAsync(agent, decision.ConversationId, ct);
+
+    // 3. Creo la risposta (true/false) e incapsulalo in un ChatMessage con ruolo User
+    var approvalResponse = requestContent.CreateResponse(decision.Approved);
+    var approvalMessage = new ChatMessage(ChatRole.User, [approvalResponse]);
+
+    AgentResponse response = await agent.RunAsync(approvalMessage, session, cancellationToken: ct);
+
+    // 4. Rimuovi la richiesta appena gestita dal DB e salva lo stato aggiornato della sessione
+    dbContext.PendingApprovals.Remove(pending);
+    await dbContext.SaveChangesAsync(ct);
+    await sessionStore.SaveAsync(agent, decision.ConversationId, session, ct);
+
+    var result = await AgentHelpers.HandleAgentResponseAsync(decision.ConversationId, response, dbContext);
+    return Results.Ok(result);
+})
+    .WithName("ApproveRequest")
+    .WithSummary("Approva o rifiuta una richiesta di approvazione");
 
 app.Run();

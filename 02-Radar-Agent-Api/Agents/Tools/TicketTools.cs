@@ -7,6 +7,9 @@ namespace radar_agent_api.Agents.Tools
 {
     public class TicketTools(AppDbContext dbContext)
     {
+        private static readonly string[] AllowedPriorities = ["Low", "Medium", "High", "Critical"];
+
+
         [Description("Cerca e restituisce i ticket di supporto dal database filtrati per stato (es. 'Open', 'Closed'). Se status è vuoto, restituisce tutti i ticket.")]
         public async Task<string> SearchTicketsAsync(
             [Description("Lo stato del ticket da cercare, ad esempio 'Open' oppure 'Closed'.")] string? status = null)
@@ -35,6 +38,19 @@ namespace radar_agent_api.Agents.Tools
             [Description("Il titolo o breve descrizione del problema del ticket.")] string title,
             [Description("La priorità del ticket: 'Low', 'Medium', 'High' o 'Critical'.")] string priority)
         {
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                return "Errore di validazione: il titolo del ticket non può essere vuoto.";
+            }
+
+            var normalizedPriority = AllowedPriorities.FirstOrDefault(
+                p => p.Equals(priority?.Trim(), StringComparison.OrdinalIgnoreCase));
+
+            if (normalizedPriority is null)
+            {
+                return $"Errore di validazione: la priorità '{priority}' non è valida. Valori ammessi: Low, Medium, High o Critical.";
+            }
+
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine($"[TOOL DB - CreateTickets]: Creazione ticket '{title}' (Priorità: {priority})...");
             Console.ResetColor();

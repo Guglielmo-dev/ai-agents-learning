@@ -9,7 +9,24 @@
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     }
 
-    // DTO (Data Transfer Objects) per il body JSON in ingresso e in uscita
+    // DTO per il body JSON in ingresso e in uscita
     public record ChatRequest(string ConversationId, string Message);
-    public record ChatResponse(string ConversationId, string Reply);
+
+    public record PendingApprovalDto(
+        string RequestId,
+        string FunctionName,
+        IDictionary<string, object?>? Arguments
+    );
+
+    public record ChatResponse(
+        string ConversationId,
+        string? Reply,
+        List<PendingApprovalDto>? PendingApprovals = null
+    );
+
+    public record ApprovalDecisionRequest(
+        string ConversationId,
+        string RequestId,
+        bool Approved
+    );
 }
