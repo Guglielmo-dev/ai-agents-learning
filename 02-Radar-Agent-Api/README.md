@@ -1,16 +1,16 @@
 # 02-Radar-Agent-Api
 
-An AI Support Agent built with **.NET 10 Minimal APIs**, **Microsoft.Agents.AI**, **Entity Framework Core**, and **SQL Server**, with the API and database containerized using **Docker Compose**.
+An AI Support Agent built with **.NET 10 Minimal APIs**, **Microsoft.Agents.AI**, **Entity Framework Core**, **SQL Server**, and a **React (TypeScript + Vite)** frontend. The API, database, and Aspire Dashboard are containerized using **Docker Compose**.
 
-The agent manages multi-turn conversations through `conversationId` and interacts with a relational database through custom AI tools (`SearchTickets` and `CreateTicket`), powered by a local **Qwen3:4b** language model running on the host machine through **Ollama**. Creating a ticket requires human approval through `POST /chat/approve`.
+The agent manages multi-turn conversations through `conversationId` and interacts with a relational database through custom AI tools (`SearchTickets` and `CreateTicket`), powered by a local **Qwen3:4b** language model running on the host machine through **Ollama**. Creating a ticket requires human approval through `POST /chat/approve` or via the interactive UI card.
 
 ## Architecture & Request Flow
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as Client (Scalar / HTTP)
-    participant API as .NET 10 Minimal API (/chat)
+    actor Client as React UI / Client
+    participant API as .NET 10 Minimal API
     participant Chat as ChatService
     participant Store as PersistentSessionStore (RAM + SQL)
     participant Agent as AIAgent (DatabaseSupportAgent)
@@ -18,126 +18,177 @@ sequenceDiagram
     participant Tools as TicketTools (EF Core)
     participant DB as SQL Server (Docker)
 
-    Client->>API: POST /chat { conversationId, message }
-    API->>Chat: SendMessageAsync(request)
-    Chat->>Store: Get or create AgentSession
-    Store-->>Chat: Cached, restored, or new session
-    Chat->>Agent: RunAsync(message, session)
+    alt Standard HTTP Request (POST /chat)
+        Client->>API: POST /chat { conversationId, message }
+        API->>Chat: SendMessageAsync(request)
+        Chat->>Store: Get or create AgentSession
+        Store-->>Chat: Cached, restored, or new session
+        Chat->>Agent: RunAsync(message, session)
+    else Streaming Request (GET /chat/stream via EventSource)
+        Client->>API: GET /chat/stream?conversationId=...&message=...
+        API->>Chat: SendMessageStreamingAsync
+        Chat->>Agent: RunStreamingAsync(message, session)
+        Agent-->>Client: SSE events ('chunk') token-by-token
+    end
+
     Agent->>LLM: Send prompt + tool schemas + history
     LLM-->>Agent: Request tool call
-    opt Tool execution is allowed (search or approved creation)
-    Agent->>Tools: Execute C# method
-    Tools->>DB: Query / Insert via AppDbContext
-    DB-->>Tools: SQL rows / confirmation
-    Tools-->>Agent: JSON result
-    Agent->>LLM: Send tool output
+
+    alt Human-in-the-Loop Required (CreateTicket)
+        Agent-->>Chat: ToolApprovalRequestContent
+        Chat->>DB: Save PendingApproval record
+        Chat-->>Client: approval event / pendingApprovals payload
+        Client->>Client: Display Approva / Rifiuta UI Card
+        Client->>API: POST /chat/approve { conversationId, requestId, approved }
+        API->>Agent: Resume run with approval decision
+    else Tool execution allowed directly (SearchTickets)
+        Agent->>Tools: Execute C# method
+        Tools->>DB: Query via AppDbContext
+        DB-->>Tools: SQL rows
+        Tools-->>Agent: JSON result
+    end
+
+    Agent->>LLM: Send tool output / approval status
     LLM-->>Agent: Final natural language response
-    end
-    Agent-->>Chat: AgentResponse (text or approval requests)
-    Chat->>Store: Save session
-    Store->>DB: Persist serialized session
-    opt Approval requests are present
-    Chat->>DB: Persist pending approvals
-    end
-    Chat-->>API: ChatResponse
-    API-->>Client: 200 OK { conversationId, reply, pendingApprovals }
+    Chat->>Store: Save session state to SQL
+    Chat-->>Client: Final text response / 'done' SSE event
 ```
 
 ## Project Structure
 
 - `02-Radar-Agent-Api/` — .NET 10 Web API, EF Core `AppDbContext`, migrations, `TicketTools`, `Dockerfile`, and `docker-compose.yml`.
-- `../radar-agent-api.Tests/` — Sibling xUnit test project using an isolated EF Core In-Memory database, with no LLM dependency.
-- `evals.md` — Qualitative evaluation dataset in this project, covering single-turn and multi-turn agent scenarios.
+- `radar-agent-ui/` — React 18 + TypeScript + Vite UI featuring token streaming, React Query, and human approval cards.
+- `../radar-agent-api.Tests/` — Sibling xUnit test project using an isolated EF Core In-Memory database with no LLM dependency.
+- `evals.md` — Qualitative evaluation dataset covering single-turn and multi-turn agent scenarios.
 
-### Responsibilities after the structural refactoring
+### Responsibilities after structural refactoring
 
 | File or directory | Responsibility |
 | --- | --- |
-| `Program.cs` | Application startup, CORS, database registration/migrations, middleware, and endpoint mapping. |
-| `Contracts/Chat/` | HTTP request and response records shared with the client through JSON. These are not EF entities. |
-| `Endpoints/ChatEndpoints/ChatEndpoints.cs` | Route definitions and translation of service outcomes into HTTP responses. |
-| `Services/ChatService.cs` | Conversation orchestration: load session, run agent, save state, and process approvals. |
-| `Services/ChatApprovalResult.cs` | Application outcome of an approval; contains no HTTP status codes or results. |
-| `Extensions/AgentServiceCollectionExtensions.cs` | `AddRadarAgent`: registers the client, agent, tools, store, and chat service with their lifetimes. |
-| `Agents/SupportAgentInstructions.cs` | The agent's instructions, kept separate from application startup. |
-| `Agents/Tools/`, `Data/`, `Store/` | Tool implementations, EF persistence, and session storage. |
+| `Program.cs` | Application startup, CORS policies, database registration/migrations, OpenTelemetry, and endpoint mapping. |
+| `Contracts/Chat/` | HTTP request and response records shared with the client through JSON. |
+| `Endpoints/ChatEndpoints/ChatEndpoints.cs` | Route definitions (`/chat`, `/chat/stream`, `/chat/approve`) and translation of service outcomes into HTTP/SSE responses. |
+| `Services/ChatService.cs` | Conversation orchestration: session loading, normal/streaming execution, session persistence, and pending approval persistence. |
+| `Services/ChatApprovalResult.cs` | Application outcome of an approval decision. |
+| `Extensions/AgentServiceCollectionExtensions.cs` | `AddRadarAgent`: registers the client, agent, tools, store, OpenTelemetry builder, and chat service with their DI lifetimes. |
+| `Agents/SupportAgentInstructions.cs` | Agent system instructions kept separate from application configuration. |
+| `Agents/Tools/`, `Data/`, `Store/` | Tool implementations (`SearchTickets`, `CreateTicket`), EF Core persistence, and `AgentSession` storage. |
 
-Read the main flow in this order: `Program.cs` → `ChatEndpoints` → `ChatService` → agent/tools/store. Read `AddRadarAgent` to understand how those dependencies are constructed. The previous `AgentHelpers` response processing now belongs to `ChatService` because it participates in this application flow and writes pending approvals.
+---
 
-This refactoring preserves the existing routes, JSON contracts, messages, prompt/model, DI lifetimes, and order of database writes. Changes to validation, concurrent conversations, approval batching, cache policy, and database transactions are separate follow-up work. In particular, `/chat/raw` retains its existing plain-text behavior and does not persist pending approvals.
+## Interactive React UI Frontend (`radar-agent-ui`)
 
-`ChatRefactoringTests` exercises the real HTTP endpoints with a scripted `IChatClient` and an isolated EF InMemory database. It covers response contracts, approval/denial, repeated and mismatched approval IDs, session restoration after a host restart, the original prompt, route/OpenAPI metadata, and DI lifetimes. These tests do not require Ollama or SQL Server and do not replace integration testing against SQL Server.
+The frontend application provides a modern chat experience with Human-in-the-Loop interactive cards:
+
+* **Real-time Streaming:** Uses the browser's `EventSource` API to receive and render tokens live as Ollama generates them.
+* **Human Approval Cards:** Displays the tool name (`CreateTicket`) and JSON payload arguments directly in the chat feed, with **Approva** and **Rifiuta** buttons.
+* **State & Mutation Management:** Uses `@tanstack/react-query` to manage approval actions and handle network state gracefully.
+
+To run the UI:
+```bash
+cd radar-agent-ui
+npm install
+npm run dev
+```
+The app will be accessible at `http://localhost:5173`.
+
+---
+
+## Streaming Chat (SSE)
+
+`GET /chat/stream` accepts `conversationId` and `message` as query parameters and returns a `text/event-stream` feed.
+
+```powershell
+curl.exe -N -G "http://localhost:8080/chat/stream" --data-urlencode "conversationId=stream-demo" --data-urlencode "message=Quali sono i ticket aperti?"
+```
+
+| Event | Data | Meaning |
+| --- | --- | --- |
+| `chunk` | Plain text fragment | Append the fragment to the current message in real-time. |
+| `approval` | JSON array of `PendingApprovalDto` | Render approval cards in the UI for the user to approve or reject. |
+| `done` | The string `done` | The agent execution run has completed and session state is persisted. |
+
+---
+
+## AI Tracing & Observability with OpenTelemetry
+
+`Program.cs` configures the OpenTelemetry tracing pipeline. The agent is instrumented in `Extensions/AgentServiceCollectionExtensions.cs`:
+
+```csharp
+return agent
+    .AsBuilder()
+    .UseOpenTelemetry(
+        sourceName: AgentTelemetry.SourceName,
+        configure: telemetry => telemetry.EnableSensitiveData = environment.IsDevelopment())
+    .Build();
+```
+
+| Component | Responsibility |
+| --- | --- |
+| `Telemetry/AgentTelemetry.cs` | Defines the shared activity source name `RadarAgent`. |
+| `UseOpenTelemetry` on agent | Emits telemetry activities for standard and streaming agent runs. |
+| `AddAspNetCoreInstrumentation()` | Traces incoming HTTP requests (`/chat`, `/chat/stream`, `/chat/approve`). |
+| `AddHttpClientInstrumentation()` | Traces outgoing HTTP calls (including Ollama requests). |
+| `AddOtlpExporter()` | Exports telemetry traces to the OTLP collector endpoint. |
+
+### Aspire Dashboard with Docker Compose
+
+The Compose file includes an `aspire-dashboard` standalone container.
+
+```bash
+docker compose up -d --wait sqlserver aspire-dashboard
+```
+
+Open [Aspire Dashboard](http://localhost:18888) in your browser. Interact with the chat app, then open **Traces** to see waterfall diagrams of request latency, LLM prompt tokens, tool execution times, and SQL queries.
+
+| API Host Environment | OTLP Ingestion Endpoint |
+| --- | --- |
+| Host Machine / Visual Studio | `http://localhost:4317` |
+| Containerized inside Compose | `http://aspire-dashboard:18889` |
+
+---
 
 ## Getting Started
 
-1. Ensure **Ollama is running on your host machine** with the `qwen3:4b-instruct-2507-q4_K_M` model downloaded.
+1. Ensure **Ollama is running on your host machine** with the `qwen3:4b` model loaded.
 
-2. Start the **API and SQL Server** from the `02-Radar-Agent-Api` directory:
-
+2. Start the **API, Database, and Aspire Dashboard**:
    ```bash
    docker compose up --build -d
    ```
 
-3. Open the [Scalar UI](http://localhost:8080/scalar/v1) to test the endpoints.
+3. Open [Scalar API Documentation](http://localhost:8080/scalar/v1) or launch the React UI (`http://localhost:5173`).
 
-4. Run the **unit tests** from the same directory:
-
+4. Run the automated **unit and refactoring tests**:
    ```bash
    dotnet test ../radar-agent-api.Tests/radar-agent-api.Tests.csproj
    ```
 
-### Running from Visual Studio
-
-Start the database before pressing F5:
-
-```powershell
-docker compose up -d --wait sqlserver
-```
-
-Select the `https` launch profile and press **F5**. Visual Studio opens [Scalar](https://localhost:7215/scalar/v1) automatically; both launch profiles explicitly set `launchBrowser` and `launchUrl`. The `http` profile uses [port 5294](http://localhost:5294/scalar/v1).
-
-The API applies migrations before starting its web server. If SQL Server is stopped, startup cannot complete and Visual Studio may report that the web server failed to listen on port 7215; Scalar and the browser cannot start until the database is available.
+---
 
 ## What I Learned
 
-1. **DI Lifetimes with AI Agents:** Since EF Core's `DbContext` is scoped, the tool classes and `AIAgent` that depend on it are also registered as scoped, while `IChatClient` and session storage remain singletons.
-2. **Stateful Multi-Turn Conversations:** Passing an `AgentSession` tied to a `conversationId` preserves context across stateless HTTP requests without coupling conversation memory to the agent instance.
-3. **Container Networking:** Docker Compose services communicate through service names (`Server=sqlserver`), while host services such as Ollama are reached through `host.docker.internal`.
-4. **Automated Schema Provisioning:** Calling `db.Database.Migrate()` at startup applies EF Core migrations and creates the database schema when starting with a fresh SQL Server container.
-5. **Deterministic vs. Probabilistic Testing:** Tool business logic can be verified deterministically with xUnit and EF Core In-Memory, while LLM behavior is evaluated separately through the scenarios in `evals.md`.
+1. **DI Lifetimes with AI Agents:** Because EF Core `DbContext` is scoped for HTTP request, tools and `AIAgent` instances that depend on it must also be registered as scoped, while `IChatClient` and session storage operate as singletons.
+2. **Stateful Multi-Turn Conversations:** Utilizing `AgentSession` tied to a persistent `conversationId` allows preserving conversation history and context across stateless HTTP requests without tying session state to in-memory agent singletons.
+3. **Human-in-the-Loop (HITL) Safety:** Wrapping sensitive function tools in `ApprovalRequiredAIFunction` ensures that destructive or mutating operations (e.g., ticket creation) are suspended into a `PendingApprovals` table until explicitly confirmed by a human user.
+4. **Real-time Server-Sent Events (SSE) Streaming:** Implementing token-by-token streaming using `RunStreamingAsync` + `TypedResults.ServerSentEvents` in .NET 10 drastically improves perceived UX, paired with `EventSource` on the React frontend.
+5. **Observability & Distributed Tracing:** Instrumenting Microsoft.Agents.AI with OpenTelemetry and Aspire Dashboard exposes detailed telemetry spans for LLM reasoning time, token counts, and tool execution bottlenecks.
+6. **Container & Hybrid Networking:** Docker Compose services communicate internally via container service names (`sqlserver`, `aspire-dashboard`), whereas calls to host-bound LLMs (Ollama) use `host.docker.internal`.
+7. **Automated Database Schema Provisioning:** Executing `db.Database.Migrate()` on startup ensures EF Core migrations run automatically when starting fresh containerized SQL Server instances.
+8. **Deterministic vs. Probabilistic Testing:** Tool business logic can be tested deterministically with xUnit and EF Core In-Memory without needing an active LLM, while prompt engineering and model behavior are evaluated via qualitative benchmark scenarios.
+9. **Modern Frontend Integration for AI:** Building a React + TypeScript frontend with TanStack Query and SSE allows seamless handling of asynchronous state, streaming buffers, and interactive approval cards.
 
-## Verify the Request and Tool Logs
+---
 
-From a terminal in the `02-Radar-Agent-Api` directory, start the services and follow the API logs:
+## Verify Request & Tool Logs
 
+From the project root:
 ```bash
 docker compose up --build -d
 docker compose logs -f api
 ```
 
-The `-f` flag keeps the terminal attached to the `api` container logs. When the agent invokes a tool, its `Console.WriteLine` output appears here; the tool code also sets console colors for these messages.
-
-Open the [Scalar UI](http://localhost:8080/scalar/v1) and send the following JSON body to **`POST /chat`**:
-
-```json
-{
-  "conversationId": "final-check",
-  "message": "create a ticket for printer issue"
-}
-```
-
-The `/chat` response contains a pending approval. Send its `requestId` to `POST /chat/approve`, using the same `conversationId`:
-
-```json
-{
-  "conversationId": "final-check",
-  "requestId": "<requestId returned by /chat>",
-  "approved": true
-}
-```
-
-After approval, when the agent invokes `CreateTicket`, look for this prefix in the terminal logs, followed by the ticket title and priority:
-
+When sending requests or approving ticket creations, look for tool execution output in the logs:
 ```text
 [TOOL DB - CreateTickets]: Creazione ticket...
 ```

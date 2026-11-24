@@ -1,10 +1,12 @@
-using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using radar_agent_api.Contracts.Chat;
 using radar_agent_api.Data;
 using radar_agent_api.Store;
+using System.Net.ServerSentEvents;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using ChatResponse = radar_agent_api.Contracts.Chat.ChatResponse;
 
 namespace radar_agent_api.Services;
@@ -22,6 +24,59 @@ public sealed class ChatService(
         await sessionStore.SaveAsync(agent, request.ConversationId, session, ct);
 
         return await HandleAgentResponseAsync(request.ConversationId, response);
+    }
+
+    public async IAsyncEnumerable<SseItem<string>> SendMessageStreamingAsync(
+        ChatRequest request,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var session = await sessionStore.GetOrCreateAsync(agent, request.ConversationId, ct);
+        var pendingDtos = new List<PendingApprovalDto>();
+
+        await foreach (var update in agent.RunStreamingAsync(request.Message, session, cancellationToken: ct))
+        {
+            // 1. Invia subito ogni frammento di testo appena arriva da Ollama
+            if (!string.IsNullOrEmpty(update.Text))
+            {
+                yield return new SseItem<string>(update.Text, eventType: "chunk");
+            }
+
+            // 2. Intercetta eventuali richieste di approvazione (CreateTicket)
+            foreach (var req in update.Contents.OfType<ToolApprovalRequestContent>())
+            {
+                var functionCall = (FunctionCallContent)req.ToolCall;
+                string serialized = JsonSerializer.Serialize<AIContent>(req, AIJsonUtilities.DefaultOptions);
+
+                dbContext.PendingApprovals.Add(new PendingApproval
+                {
+                    RequestId = req.RequestId,
+                    ConversationId = request.ConversationId,
+                    FunctionName = functionCall.Name,
+                    SerializedRequestJson = serialized
+                });
+
+                pendingDtos.Add(new PendingApprovalDto(
+                    req.RequestId,
+                    functionCall.Name,
+                    functionCall.Arguments));
+            }
+        }
+
+        // 3. Salva la sessione aggiornata e le eventuali approvazioni pendenti su SQL
+        await sessionStore.SaveAsync(agent, request.ConversationId, session, ct);
+
+        if (pendingDtos.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(ct);
+            string json = JsonSerializer.Serialize(pendingDtos, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+            yield return new SseItem<string>(json, eventType: "approval");
+        }
+
+        // 4. Segnala al browser che lo stream è terminato
+        yield return new SseItem<string>("done", eventType: "done");
     }
 
     public async Task<string> SendRawMessageAsync(ChatRequest request, CancellationToken ct = default)

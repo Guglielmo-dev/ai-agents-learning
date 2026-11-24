@@ -1,4 +1,13 @@
 services:
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    container_name: radar-aspire-dashboard
+    ports:
+      - "127.0.0.1:18888:18888" # UI web della dashboard, accessibile solo dal PC locale
+      - "127.0.0.1:4317:18889"  # OTLP/gRPC per l'API avviata da Visual Studio
+    environment:
+      ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true" # Accesso diretto senza token in locale
+
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: radar-sqlserver-compose
@@ -29,7 +38,12 @@ services:
       ConnectionStrings__DefaultConnection: "Server=sqlserver,1433;Database=RadarAgentDb;User Id=sa;Password=RadarPass2026!;TrustServerCertificate=True;"
       # Punta a Ollama in esecuzione sul PC host Windows
       Ollama__BaseUrl: "http://host.docker.internal:11434/"
+      # Tra container si usa il nome del servizio e la sua porta interna.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
     depends_on:
+      aspire-dashboard:
+        condition: service_started
       sqlserver:
         condition: service_healthy
 

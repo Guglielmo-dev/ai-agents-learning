@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http.HttpResults;
 using radar_agent_api.Contracts.Chat;
 using radar_agent_api.Services;
 
@@ -10,6 +11,10 @@ public static class ChatEndpoints
         var applicationName = endpoints.ServiceProvider.GetRequiredService<IHostEnvironment>().ApplicationName;
         var group = endpoints.MapGroup(string.Empty).WithTags(applicationName);
 
+        group.MapGet("/chat/stream", SendMessageStreamingAsync)
+            .WithName("ChatStreamingWithAgent")
+            .WithSummary("Invia un messaggio all'agente di supporto mantenendo lo stato tramite conversationId con streaming integrato");
+
         group.MapPost("/chat", SendMessageAsync)
             .WithName("ChatWithAgent")
             .WithSummary("Invia un messaggio all'agente di supporto mantenendo lo stato tramite conversationId");
@@ -19,7 +24,6 @@ public static class ChatEndpoints
         group.MapPost("/chat/approve", ApproveAsync)
             .WithName("ApproveRequest")
             .WithSummary("Approva o rifiuta una richiesta di approvazione");
-
         return group;
     }
 
@@ -30,6 +34,17 @@ public static class ChatEndpoints
     {
         var response = await chatService.SendMessageAsync(request, ct);
         return Results.Ok(response);
+    }
+
+    private static ServerSentEventsResult<string> SendMessageStreamingAsync(
+        string conversationId,
+        string message,
+        ChatService chatService,
+        CancellationToken ct)
+    {
+        var request = new ChatRequest(conversationId, message);
+        var events = chatService.SendMessageStreamingAsync(request, ct);
+        return TypedResults.ServerSentEvents(events);
     }
 
     private static async Task<IResult> SendRawMessageAsync(

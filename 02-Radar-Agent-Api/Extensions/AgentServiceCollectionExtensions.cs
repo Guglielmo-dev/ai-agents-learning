@@ -5,6 +5,7 @@ using radar_agent_api.Agents;
 using radar_agent_api.Agents.Tools;
 using radar_agent_api.Services;
 using radar_agent_api.Store;
+using radar_agent_api.Telemetry;
 
 namespace radar_agent_api.Extensions;
 
@@ -36,15 +37,23 @@ public static class AgentServiceCollectionExtensions
         {
             var chatClient = sp.GetRequiredService<IChatClient>();
             var ticketTools = sp.GetRequiredService<TicketTools>();
+            var environment = sp.GetRequiredService<IHostEnvironment>();
 
             AIFunction searchTool = AIFunctionFactory.Create(ticketTools.SearchTicketsAsync, name: "SearchTickets");
             AIFunction createTool = AIFunctionFactory.Create(ticketTools.CreateTicketAsync, name: "CreateTicket");
             AIFunction approvalRequiredCreateTicket = new ApprovalRequiredAIFunction(createTool);
 
-            return chatClient.AsAIAgent(
+            var agent = chatClient.AsAIAgent(
                 name: "DatabaseSupportAgent",
                 instructions: SupportAgentInstructions.Text,
                 tools: [searchTool, approvalRequiredCreateTicket]);
+
+            return agent
+                .AsBuilder()
+                .UseOpenTelemetry(
+                    sourceName: AgentTelemetry.SourceName,
+                    configure: telemetry => telemetry.EnableSensitiveData = environment.IsDevelopment())
+                .Build();
         });
 
         return services;

@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import {
-  sendChatMessage,
   sendApprovalDecision,
   type PendingApprovalDto,
 } from './api/chatApi';
@@ -15,6 +14,7 @@ interface UiMessage {
 }
 
 export default function App() {
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080';
   // Stesso conversationId per tutta la durata della conversazione
   const [conversationId, setConversationId] = useState<string>(() =>
     crypto.randomUUID()
@@ -24,22 +24,8 @@ export default function App() {
   const [handledRequests, setHandledRequests] = useState<Set<string>>(
     () => new Set()
   );
-
-  // Mutation 1: POST /chat
-  const chatMutation = useMutation({
-    mutationFn: sendChatMessage,
-    onSuccess: (data) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          text: data.reply ?? '(Nessuna risposta testuale)',
-          pendingApprovals: data.pendingApprovals,
-        },
-      ]);
-    },
-  });
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
 
   // Mutation 2: POST /chat/approve (integra il flusso HITL)
   const approveMutation = useMutation({
@@ -58,20 +44,68 @@ export default function App() {
     },
   });
 
-  const isBusy = chatMutation.isPending || approveMutation.isPending;
+  const isBusy = isStreaming || approveMutation.isPending;
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || isBusy) return;
 
+    const assistantMsgId = crypto.randomUUID();
+
     setMessages((prev) => [
       ...prev,
       { id: crypto.randomUUID(), role: 'user', text: trimmed },
+      { id: assistantMsgId, role: 'assistant', text: '' },
     ]);
     setInput('');
+    setStreamError(null);
+    setIsStreaming(true); 
 
-    chatMutation.mutate({ conversationId, message: trimmed });
+    const params = new URLSearchParams({
+      conversationId,
+      message: trimmed,
+    });
+
+    const eventSource = new EventSource(`${API_BASE_URL}/chat/stream?${params.toString()}`);
+
+    // Ogni token arrivato viene accodato in tempo reale
+    eventSource.addEventListener('chunk', (event) => {
+      const chunk = (event as MessageEvent<string>).data;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId ? { ...m, text: m.text + chunk } : m
+        )
+      );
+    });
+
+      // Se l'agente chiede approvazione per CreateTicket
+    eventSource.addEventListener('approval', (event) => {
+      const approvals = JSON.parse((event as MessageEvent<string>).data) as PendingApprovalDto[];
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantMsgId
+            ? {
+                ...m,
+                text: m.text || 'Azione in attesa di approvazione umana.',
+                pendingApprovals: approvals,
+              }
+            : m
+        )
+      );
+    });
+
+    // Fine dello stream: chiudi la connessione (altrimenti EventSource ritenta all'infinito!)
+    eventSource.addEventListener('done', () => {
+      eventSource.close();
+      setIsStreaming(false);
+    });
+
+    eventSource.onerror = () => {
+      eventSource.close();
+      setIsStreaming(false);
+      setStreamError('Connessione streaming interrotta.');
+    };
   };
 
   const handleApproval = (requestId: string, approved: boolean) => {
@@ -83,7 +117,7 @@ export default function App() {
     setConversationId(crypto.randomUUID());
     setMessages([]);
     setHandledRequests(new Set());
-    chatMutation.reset();
+    setStreamError(null);
     approveMutation.reset();
   };
 
@@ -154,9 +188,9 @@ export default function App() {
 
         {isBusy && <div className="status-indicator">L'agente sta elaborando...</div>}
 
-        {(chatMutation.isError || approveMutation.isError) && (
+        {(streamError || approveMutation.isError) && (
           <div className="error-box">
-            Errore: {(chatMutation.error ?? approveMutation.error)?.message}
+            Errore: {streamError ?? approveMutation.error?.message}
           </div>
         )}
       </main>
